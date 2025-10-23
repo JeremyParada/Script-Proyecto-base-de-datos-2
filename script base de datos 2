@@ -1021,13 +1021,17 @@ CREATE OR REPLACE PACKAGE BODY pkg_levelup_gamer AS
     -- =====================================================
     PROCEDURE proc_recalcular_puntos_todos IS
         CURSOR cur_usuarios IS
-            SELECT id_usuario, total_compras FROM usuarios;
+            SELECT u.id_usuario, NVL(SUM(p.total_neto),0) AS total_compras
+            FROM usuarios u
+            LEFT JOIN pedidos p ON u.id_usuario = p.id_usuario
+            GROUP BY u.id_usuario;
+
         v_puntos_ganados NUMBER(10);
     BEGIN
-        FOR rec IN cur_usuarios LOOP
+        FOR rec_usuario IN cur_usuarios LOOP
             -- Calcular 1% del total de compras como puntos
-            v_puntos_ganados := FLOOR(rec.total_compras * 0.01);
-            proc_actualizar_puntos(rec.id_usuario, v_puntos_ganados, 'RECALCULO_MASIVO');
+            v_puntos_ganados := FLOOR(rec_usuario.total_compras * 0.01);
+            proc_actualizar_puntos(rec_usuario.id_usuario, v_puntos_ganados, 'RECALCULO_MASIVO');
         END LOOP;
         COMMIT;
         DBMS_OUTPUT.PUT_LINE('Puntos recalculados para todos los usuarios.');
@@ -1036,6 +1040,7 @@ CREATE OR REPLACE PACKAGE BODY pkg_levelup_gamer AS
             ROLLBACK;
             RAISE_APPLICATION_ERROR(-20013, 'Error al recalcular puntos masivamente: ' || SQLERRM);
     END proc_recalcular_puntos_todos;
+
 
     -- =====================================================
     -- PROCEDIMIENTO: Generar reporte mensual con cursores complejos
