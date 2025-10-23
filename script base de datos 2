@@ -506,6 +506,24 @@ BEGIN
 END;
 /
 
+-- TRIGGER: Auditoría global de inserción de pedidos (nivel sentencia)
+CREATE OR REPLACE TRIGGER trg_auditoria_pedidos_global
+AFTER INSERT ON pedidos
+BEGIN
+    INSERT INTO auditoria_productos (
+        id_auditoria,
+        id_producto,
+        accion,
+        usuario_bd,
+        fecha_cambio
+    )
+    SELECT seq_auditoria_productos.NEXTVAL, id_producto, 'INSERT_PEDIDO', USER, SYSDATE
+    FROM detalle_pedido
+    WHERE id_pedido IN (SELECT MAX(id_pedido) FROM pedidos);
+END;
+/
+
+
 -- =====================================================
 -- ÍNDICES PARA MEJORAR RENDIMIENTO
 -- =====================================================
@@ -708,16 +726,28 @@ CREATE OR REPLACE PACKAGE pkg_levelup_gamer AS
     PROCEDURE proc_procesar_pedido(p_id_usuario IN NUMBER, p_productos IN t_productos_array);
     PROCEDURE proc_actualizar_puntos(p_id_usuario IN NUMBER, p_puntos IN NUMBER, p_tipo IN VARCHAR2);
     PROCEDURE proc_generar_reporte_mensual(p_anio IN NUMBER, p_mes IN NUMBER);
+    PROCEDURE proc_recalcular_puntos_todos;   -- publica
     
     -- Funciones
     FUNCTION func_calcular_descuento(p_id_usuario IN NUMBER, p_total IN NUMBER) RETURN NUMBER;
     FUNCTION func_obtener_usuario_completo(p_id_usuario IN NUMBER) RETURN t_usuario_completo;
     FUNCTION func_productos_categoria(p_id_categoria IN NUMBER) RETURN t_productos_array;
-    
+    FUNCTION func_total_ventas RETURN NUMBER; -- pública
+
 END pkg_levelup_gamer;
 /
 
 CREATE OR REPLACE PACKAGE BODY pkg_levelup_gamer AS
+    -- Variable privada solo para uso interno
+    v_total_ventas NUMBER(12,2); -- privada, no expuesta en la spec
+
+    -- Procedimiento privado (ejemplo)
+    PROCEDURE proc_actualizar_estado_pedidos_privado IS
+    BEGIN
+        UPDATE pedidos
+        SET estado_pedido = 'REVISAR'
+        WHERE estado_pedido = 'PENDIENTE';
+    END proc_actualizar_estado_pedidos_privado;
 
     -- =====================================================
     -- FUNCIÓN: Calcular descuento basado en puntos y tipo de usuario
@@ -848,6 +878,22 @@ CREATE OR REPLACE PACKAGE BODY pkg_levelup_gamer AS
     END func_productos_categoria;
 
     -- =====================================================
+    -- FUNCION: Total neto de ventas
+    -- =====================================================
+    FUNCTION func_total_ventas RETURN NUMBER IS
+        v_total NUMBER(12,2);
+    BEGIN
+        SELECT NVL(SUM(total_neto),0) INTO v_total
+        FROM pedidos
+        WHERE estado_pedido = 'ENTREGADO';
+        
+        RETURN v_total;
+    EXCEPTION
+        WHEN OTHERS THEN
+            RAISE_APPLICATION_ERROR(-20014, 'Error al obtener total de ventas: ' || SQLERRM);
+    END func_total_ventas;
+
+    -- =====================================================
     -- PROCEDIMIENTO: Procesar pedido con validaciones
     -- =====================================================
     PROCEDURE proc_procesar_pedido(p_id_usuario IN NUMBER, p_productos IN t_productos_array) IS
@@ -971,6 +1017,27 @@ CREATE OR REPLACE PACKAGE BODY pkg_levelup_gamer AS
     END proc_actualizar_puntos;
 
     -- =====================================================
+    -- PROCEDIMIENTO: Recalcular puntos para todos los usuarios (sin parámetros)
+    -- =====================================================
+    PROCEDURE proc_recalcular_puntos_todos IS
+        CURSOR cur_usuarios IS
+            SELECT id_usuario, total_compras FROM usuarios;
+        v_puntos_ganados NUMBER(10);
+    BEGIN
+        FOR rec IN cur_usuarios LOOP
+            -- Calcular 1% del total de compras como puntos
+            v_puntos_ganados := FLOOR(rec.total_compras * 0.01);
+            proc_actualizar_puntos(rec.id_usuario, v_puntos_ganados, 'RECALCULO_MASIVO');
+        END LOOP;
+        COMMIT;
+        DBMS_OUTPUT.PUT_LINE('Puntos recalculados para todos los usuarios.');
+    EXCEPTION
+        WHEN OTHERS THEN
+            ROLLBACK;
+            RAISE_APPLICATION_ERROR(-20013, 'Error al recalcular puntos masivamente: ' || SQLERRM);
+    END proc_recalcular_puntos_todos;
+
+    -- =====================================================
     -- PROCEDIMIENTO: Generar reporte mensual con cursores complejos
     -- =====================================================
     PROCEDURE proc_generar_reporte_mensual(p_anio IN NUMBER, p_mes IN NUMBER) IS
@@ -1047,61 +1114,6 @@ CREATE OR REPLACE PACKAGE BODY pkg_levelup_gamer AS
     END proc_generar_reporte_mensual;
 
 END pkg_levelup_gamer;
-/
-
--- =====================================================
--- TRIGGER ADICIONAL: Auditoría de cambios en productos
--- =====================================================
-
-CREATE TABLE auditoria_productos (
-    id_auditoria NUMBER PRIMARY KEY,
-    id_producto NUMBER,
-    accion VARCHAR2(10),
-    usuario_bd VARCHAR2(100),
-    fecha_cambio DATE,
-    precio_anterior NUMBER(10,2),
-    precio_nuevo NUMBER(10,2),
-    stock_anterior NUMBER(10),
-    stock_nuevo NUMBER(10)
-);
-
-CREATE SEQUENCE seq_auditoria_productos START WITH 1 INCREMENT BY 1;
-
-CREATE OR REPLACE TRIGGER trg_auditoria_productos
-    AFTER INSERT OR UPDATE OR DELETE ON productos
-    FOR EACH ROW
-DECLARE
-    v_accion VARCHAR2(10);
-BEGIN
-    IF INSERTING THEN
-        v_accion := 'INSERT';
-        INSERT INTO auditoria_productos (
-            id_auditoria, id_producto, accion, usuario_bd, fecha_cambio,
-            precio_anterior, precio_nuevo, stock_anterior, stock_nuevo
-        ) VALUES (
-            seq_auditoria_productos.NEXTVAL, :NEW.id_producto, v_accion, USER, SYSDATE,
-            NULL, :NEW.precio, NULL, :NEW.stock
-        );
-    ELSIF UPDATING THEN
-        v_accion := 'UPDATE';
-        INSERT INTO auditoria_productos (
-            id_auditoria, id_producto, accion, usuario_bd, fecha_cambio,
-            precio_anterior, precio_nuevo, stock_anterior, stock_nuevo
-        ) VALUES (
-            seq_auditoria_productos.NEXTVAL, :NEW.id_producto, v_accion, USER, SYSDATE,
-            :OLD.precio, :NEW.precio, :OLD.stock, :NEW.stock
-        );
-    ELSIF DELETING THEN
-        v_accion := 'DELETE';
-        INSERT INTO auditoria_productos (
-            id_auditoria, id_producto, accion, usuario_bd, fecha_cambio,
-            precio_anterior, precio_nuevo, stock_anterior, stock_nuevo
-        ) VALUES (
-            seq_auditoria_productos.NEXTVAL, :OLD.id_producto, v_accion, USER, SYSDATE,
-            :OLD.precio, NULL, :OLD.stock, NULL
-        );
-    END IF;
-END;
 /
 
 -- =====================================================
